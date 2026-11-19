@@ -500,7 +500,11 @@ async def vote_public(callback: CallbackQuery, bot: Bot) -> None:
     if turn is None:
         await answer(callback, "Этот ход недоступен. Создайте новый через /lab3.", True)
         return
-    if turn.inline_claim_id:
+    if turn.match_id is not None:
+        valid_origin = (isinstance(message, Message) and message.chat.type in GROUPS
+                        and message.ephemeral_message_id is None
+                        and message.chat.id == turn.chat_id and message.message_id == turn.claim_id)
+    elif turn.inline_claim_id:
         valid_origin = (callback.inline_message_id == turn.inline_claim_id
                         and turn.chat_instance is not None and callback.chat_instance == turn.chat_instance)
     else:
