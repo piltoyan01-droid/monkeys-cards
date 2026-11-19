@@ -269,7 +269,7 @@ class PublicLab:
         if turn.back_id is None:
             sent = await self.send_sticker(bot, turn, "card_back.webp")
             turn.back_id = sent.message_id
-        if turn.inline_claim_id:
+        if turn.inline_claim_id and turn.match_id is None:
             if not turn.inline_vote_ready:
                 # Reuse the final inline statement. Do not send a duplicate claim.
                 await apply_edit(bot.edit_message_text(inline_message_id=turn.inline_claim_id,
@@ -286,7 +286,10 @@ class PublicLab:
                     is_bot: bool, vote: str) -> None:
         if turn.expired or turn.finished:
             raise PublicTurnError("Этот ход уже завершен или устарел.")
-        if turn.claim_id is None and not (turn.inline_claim_id and turn.inline_vote_ready):
+        if turn.match_id is not None:
+            if turn.claim_id is None:
+                raise PublicTurnError("Публикация не завершена. Автору нужно повторить отправку.")
+        elif turn.claim_id is None and not (turn.inline_claim_id and turn.inline_vote_ready):
             raise PublicTurnError("Публикация не завершена. Автору нужно повторить отправку.")
         if is_bot or voter_id == turn.author_id:
             raise PublicTurnError("На ход должен ответить другой участник, не его автор.")
@@ -306,10 +309,10 @@ class PublicLab:
         turn.vote = vote
 
     async def remove_keyboard(self, bot: Bot, turn: PublicTurn) -> None:
-        if (turn.claim_id is None and turn.inline_claim_id is None) or turn.keyboard_removed:
+        if (turn.claim_id is None and (turn.match_id is not None or turn.inline_claim_id is None)) or turn.keyboard_removed:
             return
         try:
-            if turn.inline_claim_id:
+            if turn.inline_claim_id and turn.match_id is None:
                 await apply_edit(bot.edit_message_reply_markup(inline_message_id=turn.inline_claim_id,
                                                                reply_markup=inline_controls(turn)))
             else:
@@ -346,7 +349,7 @@ class PublicLab:
                 turn.announcement_done = True
         if turn.match_id and turn.keyboard_removed:
             turn.inline_finished_updated = True
-        if turn.inline_claim_id and not turn.inline_finished_updated:
+        if turn.inline_claim_id and turn.match_id is None and not turn.inline_finished_updated:
             try:
                 await apply_edit(bot.edit_message_reply_markup(inline_message_id=turn.inline_claim_id,
                                                                reply_markup=inline_controls(turn)))
