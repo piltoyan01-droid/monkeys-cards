@@ -221,6 +221,10 @@ class GameFlow:
     async def announce_turn(self, bot: Bot, game: Match) -> None:
         if game.status != "active" or game.pending is not None or game.turns_done in game.announcements:
             return
+        self.matches.skip_empty_turns(game)
+        if game.status == "finished":
+            await self.finish_game(bot, game)
+            return
         panel = InlinePanel(secrets.token_urlsafe(9), game.chat_id, game.thread_id,
                             chat_instance=game.chat_instance, match_id=game.token, match_turn=game.turns_done)
         self.inline.panels[panel.token] = panel
