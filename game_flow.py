@@ -33,7 +33,11 @@ class GameFlow:
         self.close_private = close_private
         self.modes = modes
         self.player_modes = effective_modes or (lambda chat, user: self.modes(chat))
-        self.inline.mode_enabled = lambda chat, user: self.player_modes(chat, user).inline
+        # Inline card selection is reserved for standalone experiments. A real
+        # match always uses the private ephemeral hand and ordinary group voting.
+        self.inline.mode_enabled = lambda chat, user: (
+            self.matches.ongoing(chat) is None and self.player_modes(chat, user).inline
+        )
         self.inline.return_modes = self.back_from_inline
         self.inline.mode_opened = self.inline_opened
         self.selected_modes: dict[tuple[str, int], str] = {}
@@ -49,19 +53,13 @@ class GameFlow:
         ephemeral = InlineKeyboardButton(text="Мои карты",
                                          callback_data=f"lab3:game:{game.token}:{game.turns_done}")
         inline = InlineKeyboardButton(text="Скинуть карту", switch_inline_query_current_chat=f"lab4 {panel.token}")
-        if mode is None:
-            options = self.player_modes(game.chat_id, game.author.user_id)
-            rows = ([[inline]] if options.inline else []) + ([[ephemeral]] if options.ephemeral else [])
-            return InlineKeyboardMarkup(inline_keyboard=rows)
-        rows = [[inline if mode == "inline" else ephemeral]]
-        if self.can_choose_mode(game.chat_id, game.author.user_id):
-            rows.append([InlineKeyboardButton(text="Назад к выбору режима",
-                         callback_data=f"game:back:{game.token}:{game.turns_done}")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+        # The live match uses only the existing ephemeral private hand.
+        # Inline-mode cards and votes belong to standalone experiments.
+        return InlineKeyboardMarkup(inline_keyboard=[[ephemeral]])
 
     def can_choose_mode(self, chat_id: int, user_id: int) -> bool:
-        options = self.player_modes(chat_id, user_id)
-        return options.inline and options.ephemeral
+        # No mode switch during a registered match: selection stays ephemeral.
+        return False
 
     async def show_mode(self, bot: Bot, game: Match, user_id: int, mode: str) -> None:
         self.matches.validate_selection(game.chat_id, user_id, game.token, game.turns_done)
@@ -228,9 +226,7 @@ class GameFlow:
         panel = InlinePanel(secrets.token_urlsafe(9), game.chat_id, game.thread_id,
                             chat_instance=game.chat_instance, match_id=game.token, match_turn=game.turns_done)
         self.inline.panels[panel.token] = panel
-        inline_enabled = self.player_modes(game.chat_id, game.author.user_id).inline
-        if inline_enabled:
-            await self.inline.prepare_faces(bot, game.author.user_id, tuple(game.hands[game.author.user_id]))
+        inline_enabled = False
         blocks = [InputRichBlockParagraph(text=RichTextBold(text=turn_label(game.turns_done, game.total_turns, game.current_round))),
                   InputRichBlockParagraph(text=["Ходит: ", rich_profile(game.author.user_id, game.author.name),
                                                "\nОтвечает: ", rich_profile(game.voter.user_id, game.voter.name)])]
