@@ -52,7 +52,6 @@ class GameFlow:
     def turn_keyboard(self, game: Match, panel: InlinePanel, mode: str | None = None) -> InlineKeyboardMarkup:
         ephemeral = InlineKeyboardButton(text="Мои карты",
                                          callback_data=f"lab3:game:{game.token}:{game.turns_done}")
-        inline = InlineKeyboardButton(text="Скинуть карту", switch_inline_query_current_chat=f"lab4 {panel.token}")
         # The live match uses only the existing ephemeral private hand.
         # Inline-mode cards and votes belong to standalone experiments.
         return InlineKeyboardMarkup(inline_keyboard=[[ephemeral]])
@@ -226,15 +225,9 @@ class GameFlow:
         panel = InlinePanel(secrets.token_urlsafe(9), game.chat_id, game.thread_id,
                             chat_instance=game.chat_instance, match_id=game.token, match_turn=game.turns_done)
         self.inline.panels[panel.token] = panel
-        inline_enabled = False
         blocks = [InputRichBlockParagraph(text=RichTextBold(text=turn_label(game.turns_done, game.total_turns, game.current_round))),
                   InputRichBlockParagraph(text=["Ходит: ", rich_profile(game.author.user_id, game.author.name),
                                                "\nОтвечает: ", rich_profile(game.voter.user_id, game.voter.name)])]
-        if inline_enabled:
-            blocks.append(InputRichBlockDetails(summary="Как заявить другую карту", is_open=False, blocks=[
-                InputRichBlockParagraph(text="— Поставьте пробел, допишите номинал и масть карты, которую хотите заявить.\n"
-                                             "Пример: =6пики, =даматреф, =туз червей"),
-                InputRichBlockParagraph(text="— Затем нажмите на настоящую. Без текстовых дополнений отправится настоящая карта.")]))
         blocks.append(InputRichBlockParagraph(text=[rich_profile(game.author.user_id, game.author.name), ", выбирай карту."]))
         keyboard = self.turn_keyboard(game, panel)
         sent = await bot.send_rich_message(chat_id=game.chat_id, message_thread_id=game.thread_id,
