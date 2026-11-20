@@ -46,20 +46,20 @@ jobs:
           done
           test "$count" -eq 37
           cat > package/README_NETANGELS.txt <<'EOF'
-MONKEYS CARDS — package for NetAngels
+          MONKEYS CARDS — package for NetAngels
 
-1. Upload and extract this ZIP into the bot project directory.
-2. Keep the assets/stickers folder in the same directory as main.py.
-3. Install dependencies from requirements.txt:
-   python -m pip install -r requirements.txt
-4. Configure BOT_TOKEN as an environment variable in the hosting panel.
-   Optional: BOT_USERNAME (without @). Default: monkeysmafcardsbot.
-5. Start the bot with:
-   python main.py
+          1. Upload and extract this ZIP into the bot project directory.
+          2. Keep the assets/stickers folder in the same directory as main.py.
+          3. Install dependencies from requirements.txt:
+             python -m pip install -r requirements.txt
+          4. Configure BOT_TOKEN as an environment variable in the hosting panel.
+             Optional: BOT_USERNAME (without @). Default: monkeysmafcardsbot.
+          5. Start the bot with:
+             python main.py
 
-Do not upload your bot token to GitHub or include it in this archive.
-This package is built from feature/cab-sherlock-complete.
-EOF
+          Do not upload your bot token to GitHub or include it in this archive.
+          This package is built from feature/cab-sherlock-complete.
+          EOF
           cd package
           zip -qr ../MONKEYS-CARDS-NetAngels.zip .
           cd ..
