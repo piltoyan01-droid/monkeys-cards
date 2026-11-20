@@ -15,6 +15,7 @@ class PlayerStatsRecord:
 
 @dataclass(frozen=True)
 class PendingAchievement:
+    chat_id: int
     user_id: int
     display_name: str
     key: str
@@ -42,10 +43,11 @@ class PlayerStats:
                     match_id TEXT PRIMARY KEY
                 );
                 CREATE TABLE IF NOT EXISTS achievements (
+                    chat_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
                     achievement_key TEXT NOT NULL,
                     announced INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (user_id, achievement_key)
+                    PRIMARY KEY (chat_id, user_id, achievement_key)
                 );
                 """
             )
@@ -56,7 +58,7 @@ class PlayerStats:
         db.execute("PRAGMA foreign_keys = ON")
         return db
 
-    def record_match(self, match_id: str, results: Iterable[tuple[int, str, bool]]) -> bool:
+    def record_match(self, match_id: str, chat_id: int, results: Iterable[tuple[int, str, bool]]) -> bool:
         """Record one completed match. Each result is (user_id, display_name, won)."""
         rows = [(int(user_id), " ".join(name.split())[:80] or "Игрок", bool(won))
                 for user_id, name, won in results]
@@ -98,8 +100,8 @@ class PlayerStats:
                 )
                 if won and next_streak >= 2 and not already_awarded:
                     db.execute(
-                        "INSERT OR IGNORE INTO achievements(user_id, achievement_key) VALUES (?, 'sherlock')",
-                        (user_id,),
+                        "INSERT OR IGNORE INTO achievements(chat_id, user_id, achievement_key) VALUES (?, ?, 'sherlock')",
+                        (int(chat_id), user_id),
                     )
             return True
 
@@ -116,22 +118,22 @@ class PlayerStats:
         with self._connect() as db:
             rows = db.execute(
                 """
-                SELECT a.user_id, p.display_name, a.achievement_key
+                SELECT a.chat_id, a.user_id, p.display_name, a.achievement_key
                 FROM achievements AS a
                 JOIN player_stats AS p ON p.user_id = a.user_id
                 WHERE a.announced = 0
                 ORDER BY a.rowid
                 """
             ).fetchall()
-        return [PendingAchievement(int(row["user_id"]), str(row["display_name"]),
-                                   str(row["achievement_key"])) for row in rows]
+        return [PendingAchievement(int(row["chat_id"]), int(row["user_id"]),
+                                   str(row["display_name"]), str(row["achievement_key"])) for row in rows]
 
     def mark_achievements_announced(self, achievements: Iterable[PendingAchievement]) -> None:
-        items = [(item.user_id, item.key) for item in achievements]
+        items = [(item.chat_id, item.user_id, item.key) for item in achievements]
         if not items:
             return
         with self._connect() as db:
             db.executemany(
-                "UPDATE achievements SET announced = 1 WHERE user_id = ? AND achievement_key = ?",
+                "UPDATE achievements SET announced = 1 WHERE chat_id = ? AND user_id = ? AND achievement_key = ?",
                 items,
             )
