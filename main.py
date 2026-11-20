@@ -31,6 +31,7 @@ from inline_mode import InlineLab
 from match_engine import MatchError, MatchManager
 from game_flow import GameFlow
 from group_settings import GroupSettings, SettingsUI
+from player_stats import PlayerStats
 
 LOG = logging.getLogger("monkeys_lab")
 GROUPS = {ChatType.GROUP, ChatType.SUPERGROUP}
@@ -87,8 +88,9 @@ async def close_private_view(bot: Bot, chat_id: int, user_id: int) -> None:
 
 
 group_settings = GroupSettings(ROOT / "data" / "group_settings.json")
+player_stats = PlayerStats(ROOT / "data" / "player_stats.sqlite3")
 game_flow = GameFlow(matches, lambda: public_lab, inline_lab, close_private_view,
-                     group_settings.get, group_settings.effective)
+                     group_settings.get, group_settings.effective, player_stats)
 settings_ui = SettingsUI(group_settings, game_flow.refresh_modes, game_flow.refresh_personal)
 public_lab.after_game_turn = game_flow.after_turn
 
