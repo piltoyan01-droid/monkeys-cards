@@ -253,14 +253,11 @@ class GameFlow:
             await message.answer("Личный кабинет временно недоступен.")
             return
         record = self.player_stats.get(message.from_user.id)
-        win_rate = (record.wins / record.played * 100) if record.played else 0
         await message.answer(
-            "<b>🐒 Личный кабинет MONKEYS CARDS</b>\\n\\n"
-            f"Игрок: {profile_link(message.from_user.id, message.from_user.full_name)}\\n"
-            f"Сыграно партий: <b>{record.played}</b>\\n"
-            f"Побед: <b>{record.wins}</b>\\n"
-            f"Поражений: <b>{record.losses}</b>\\n"
-            f"Процент побед: <b>{win_rate:.1f}%</b>",
+            "<b>Личный кабинет игрока</b>\\n\\n"
+            f"Партий сыграно: {record.played}\\n"
+            f"Победных партий из них: {record.wins}\\n"
+            f"Проигранных партий из них: {record.losses}",
             parse_mode="HTML", link_preview_options=NO_PREVIEW,
         )
 
@@ -283,10 +280,8 @@ class GameFlow:
                 if item.key != "sherlock":
                     continue
                 congratulation = (
-                    f"🔎 <b>Новое достижение!</b>\\n\\n"
-                    f"{profile_link(item.user_id, item.display_name)}, поздравляем!\\n"
-                    "<b>Шерлок</b> — две победы подряд. "
-                    "Достижение сохранено в вашей статистике."
+                    f"Что ж, {profile_link(item.user_id, item.display_name)}, а ты не так прост! "
+                    "Получай ачивку «Шерлок» и продолжай ебать эту игру!"
                 )
                 await bot.send_message(chat_id=item.chat_id, text=congratulation,
                                        parse_mode="HTML", link_preview_options=NO_PREVIEW)
