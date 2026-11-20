@@ -15,6 +15,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 
 from inline_mode import INLINE_TTL, InlineLab, InlinePanel, InlineSession
 from match_engine import Match, MatchError, MatchManager, MAX_PLAYERS, TURNS_PER_PLAYER
+from player_stats import PlayerStats
 from public_turn import PublicLab, PublicTurn, NO_PREVIEW, apply_edit, profile_link, result_text, rich_profile, remember_profile, turn_label
 from group_settings import CardModes
 
@@ -26,20 +27,27 @@ class GameFlow:
     def __init__(self, matches: MatchManager, public_provider: Callable[[], PublicLab], inline: InlineLab,
                  close_private: Callable[[Bot, int, int], Awaitable[None]] | None = None,
                  modes: Callable[[int], CardModes] = lambda chat: CardModes(),
-                 effective_modes: Callable[[int, int], CardModes] | None = None):
+                 effective_modes: Callable[[int, int], CardModes] | None = None,
+                 player_stats: PlayerStats | None = None):
         self.matches = matches
         self.public_provider = public_provider
         self.inline = inline
         self.close_private = close_private
         self.modes = modes
         self.player_modes = effective_modes or (lambda chat, user: self.modes(chat))
-        self.inline.mode_enabled = lambda chat, user: self.player_modes(chat, user).inline
+        self.player_stats = player_stats
+        # Inline card selection is reserved for standalone experiments. A real
+        # match always uses the private ephemeral hand and ordinary group voting.
+        self.inline.mode_enabled = lambda chat, user: (
+            self.matches.ongoing(chat) is None and self.player_modes(chat, user).inline
+        )
         self.inline.return_modes = self.back_from_inline
         self.inline.mode_opened = self.inline_opened
         self.selected_modes: dict[tuple[str, int], str] = {}
         self.router = Router(name="registered_games")
         self.router.message.register(self.create_game, Command("game"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.stats, Command("stata"), F.chat.type.in_(GROUPS))
+        self.router.message.register(self.cabinet, Command("cab"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.stop, Command("stop"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.leave, Command("leave"))
         self.router.callback_query.register(self.back_action, F.data.startswith("game:back:"))
@@ -48,20 +56,13 @@ class GameFlow:
     def turn_keyboard(self, game: Match, panel: InlinePanel, mode: str | None = None) -> InlineKeyboardMarkup:
         ephemeral = InlineKeyboardButton(text="Мои карты",
                                          callback_data=f"lab3:game:{game.token}:{game.turns_done}")
-        inline = InlineKeyboardButton(text="Скинуть карту", switch_inline_query_current_chat=f"lab4 {panel.token}")
-        if mode is None:
-            options = self.player_modes(game.chat_id, game.author.user_id)
-            rows = ([[inline]] if options.inline else []) + ([[ephemeral]] if options.ephemeral else [])
-            return InlineKeyboardMarkup(inline_keyboard=rows)
-        rows = [[inline if mode == "inline" else ephemeral]]
-        if self.can_choose_mode(game.chat_id, game.author.user_id):
-            rows.append([InlineKeyboardButton(text="Назад к выбору режима",
-                         callback_data=f"game:back:{game.token}:{game.turns_done}")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+        # The live match uses only the existing ephemeral private hand.
+        # Inline-mode cards and votes belong to standalone experiments.
+        return InlineKeyboardMarkup(inline_keyboard=[[ephemeral]])
 
     def can_choose_mode(self, chat_id: int, user_id: int) -> bool:
-        options = self.player_modes(chat_id, user_id)
-        return options.inline and options.ephemeral
+        # No mode switch during a registered match: selection stays ephemeral.
+        return False
 
     async def show_mode(self, bot: Bot, game: Match, user_id: int, mode: str) -> None:
         self.matches.validate_selection(game.chat_id, user_id, game.token, game.turns_done)
@@ -221,20 +222,16 @@ class GameFlow:
     async def announce_turn(self, bot: Bot, game: Match) -> None:
         if game.status != "active" or game.pending is not None or game.turns_done in game.announcements:
             return
+        self.matches.skip_empty_turns(game)
+        if game.status == "finished":
+            await self.finish_game(bot, game)
+            return
         panel = InlinePanel(secrets.token_urlsafe(9), game.chat_id, game.thread_id,
                             chat_instance=game.chat_instance, match_id=game.token, match_turn=game.turns_done)
         self.inline.panels[panel.token] = panel
-        inline_enabled = self.player_modes(game.chat_id, game.author.user_id).inline
-        if inline_enabled:
-            await self.inline.prepare_faces(bot, game.author.user_id, tuple(game.hands[game.author.user_id]))
         blocks = [InputRichBlockParagraph(text=RichTextBold(text=turn_label(game.turns_done, game.total_turns, game.current_round))),
                   InputRichBlockParagraph(text=["Ходит: ", rich_profile(game.author.user_id, game.author.name),
                                                "\nОтвечает: ", rich_profile(game.voter.user_id, game.voter.name)])]
-        if inline_enabled:
-            blocks.append(InputRichBlockDetails(summary="Как заявить другую карту", is_open=False, blocks=[
-                InputRichBlockParagraph(text="— Поставьте пробел, допишите номинал и масть карты, которую хотите заявить.\n"
-                                             "Пример: =6пики, =даматреф, =туз червей"),
-                InputRichBlockParagraph(text="— Затем нажмите на настоящую. Без текстовых дополнений отправится настоящая карта.")]))
         blocks.append(InputRichBlockParagraph(text=[rich_profile(game.author.user_id, game.author.name), ", выбирай карту."]))
         keyboard = self.turn_keyboard(game, panel)
         sent = await bot.send_rich_message(chat_id=game.chat_id, message_thread_id=game.thread_id,
@@ -249,25 +246,62 @@ class GameFlow:
         elif game.status == "finished":
             await self.finish_game(bot, game)
 
+    async def cabinet(self, message: Message) -> None:
+        if message.from_user is None or message.from_user.is_bot:
+            return
+        if self.player_stats is None:
+            await message.answer("Личный кабинет временно недоступен.")
+            return
+        record = self.player_stats.get(message.from_user.id)
+        await message.answer(
+            "<b>Личный кабинет игрока</b>\n\n"
+            f"Партий сыграно: {record.played}\n"
+            f"Победных партий из них: {record.wins}\n"
+            f"Проигранных партий из них: {record.losses}",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW,
+        )
+
     async def finish_game(self, bot: Bot, game: Match) -> None:
-        if game.status == "finished" and game.final_message_id is None:
-            ranking = self.matches.ranking(game)
-            best = ranking[0][1]
-            winners = [(player, count) for player, count in ranking if count == best]
-            others = [(player, count) for player, count in ranking if count != best]
-            title = "Победитель:" if len(winners) == 1 else "Победители (ничья):"
-            lines = ["🏆 <b>Партия завершена!</b>", "",
-                     f"Ходов сыграно: {game.turns_done}/{game.total_turns}", "", f"<b>{title}</b>"]
-            lines += [f"{i + 1}. {profile_link(player.user_id, player.name)} — {count} карт"
-                      for i, (player, count) in enumerate(winners)]
-            if others:
-                lines += ["", "<b>Остальные игроки:</b>"]
-                lines += [f"{i + 1 + len(winners)}. {profile_link(player.user_id, player.name)} — {count} карт"
-                          for i, (player, count) in enumerate(others)]
-            lines += ["", "Новая партия: /game."]
-            sent = await bot.send_message(chat_id=game.chat_id, message_thread_id=game.thread_id,
-                                          text="\n".join(lines), parse_mode="HTML", link_preview_options=NO_PREVIEW)
-            game.final_message_id = sent.message_id
+        if game.status != "finished":
+            return
+        ranking = self.matches.ranking(game)
+        best = ranking[0][1]
+        winners = [(player, count) for player, count in ranking if count == best]
+        others = [(player, count) for player, count in ranking if count != best]
+        # Persist once before Telegram delivery; retrying the same match is safe.
+        if self.player_stats is not None:
+            self.player_stats.record_match(
+                game.token, game.chat_id,
+                [(player.user_id, player.name, count == best) for player, count in ranking],
+            )
+            pending = [item for item in self.player_stats.pending_achievements()
+                       if item.chat_id == game.chat_id]
+            for item in pending:
+                if item.key != "sherlock":
+                    continue
+                congratulation = (
+                    f"Что ж, {profile_link(item.user_id, item.display_name)}, а ты не так прост! "
+                    "Получай ачивку «Шерлок» и продолжай ебать эту игру!"
+                )
+                await bot.send_message(chat_id=item.chat_id, text=congratulation,
+                                       parse_mode="HTML", link_preview_options=NO_PREVIEW)
+                self.player_stats.mark_achievements_announced([item])
+        if game.final_message_id is not None:
+            return
+        title = "Победитель:" if len(winners) == 1 else "Победители (ничья):"
+        lines = ["🏆 <b>Партия завершена!</b>", "",
+                 f"Ходов сыграно: {game.turns_done}/{game.total_turns}", "", f"<b>{title}</b>"]
+        lines += [f"{i + 1}. {profile_link(player.user_id, player.name)} — {count} карт"
+                  for i, (player, count) in enumerate(winners)]
+        if others:
+            lines += ["", "<b>Остальные игроки:</b>"]
+            lines += [f"{i + 1 + len(winners)}. {profile_link(player.user_id, player.name)} — {count} карт"
+                      for i, (player, count) in enumerate(others)]
+        lines += ["", "Личный кабинет: /cab. Новая партия: /game."]
+        sent = await bot.send_message(chat_id=game.chat_id, message_thread_id=game.thread_id,
+                                      text="\n".join(lines), parse_mode="HTML", link_preview_options=NO_PREVIEW)
+
+        game.final_message_id = sent.message_id
 
     async def stats(self, message: Message) -> None:
         game = self.matches.games.get(message.chat.id)

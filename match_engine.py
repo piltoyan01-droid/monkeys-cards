@@ -129,6 +129,23 @@ class MatchManager:
         game.chat_instance = chat_instance
         game.status = "active"
 
+    def skip_empty_turns(self, game: Match) -> list[TurnSlot]:
+        """Consume scheduled turns for players whose hands are empty."""
+        skipped: list[TurnSlot] = []
+        if game.status != "active" or game.pending is not None:
+            return skipped
+        while game.remaining_turns:
+            slot = game.remaining_turns[0]
+            if game.hands.get(slot.author_id):
+                break
+            game.remaining_turns.pop(0)
+            game.turns_by_player[slot.author_id] = game.turns_by_player.get(slot.author_id, 0) + 1
+            game.turns_done += 1
+            skipped.append(slot)
+        if not game.remaining_turns:
+            game.status = "finished"
+        return skipped
+
     def validate_selection(self, chat_id: int, user_id: int, match_id: str | None,
                            match_turn: int | None, allow_pending: bool = False) -> Match | None:
         game = self.ongoing(chat_id)
