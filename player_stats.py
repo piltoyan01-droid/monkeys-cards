@@ -1,5 +1,6 @@
 """Persistent player statistics and one-time achievements for MONKEYS CARDS."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
@@ -27,7 +28,7 @@ class PlayerStats:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as db:
+        with self._db() as db:
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS player_stats (
@@ -58,13 +59,25 @@ class PlayerStats:
         db.execute("PRAGMA foreign_keys = ON")
         return db
 
+    @contextmanager
+    def _db(self):
+        db = self._connect()
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def record_match(self, match_id: str, chat_id: int, results: Iterable[tuple[int, str, bool]]) -> bool:
         """Record one completed match. Each result is (user_id, display_name, won)."""
         rows = [(int(user_id), " ".join(name.split())[:80] or "Игрок", bool(won))
                 for user_id, name, won in results]
         if not match_id or not rows:
             return False
-        with self._connect() as db:
+        with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             inserted = db.execute(
                 "INSERT OR IGNORE INTO processed_matches(match_id) VALUES (?)", (match_id,)
@@ -106,7 +119,7 @@ class PlayerStats:
             return True
 
     def get(self, user_id: int) -> PlayerStatsRecord:
-        with self._connect() as db:
+        with self._db() as db:
             row = db.execute(
                 "SELECT played, wins, losses FROM player_stats WHERE user_id = ?", (int(user_id),)
             ).fetchone()
@@ -115,7 +128,7 @@ class PlayerStats:
         return PlayerStatsRecord(int(row["played"]), int(row["wins"]), int(row["losses"]))
 
     def pending_achievements(self) -> list[PendingAchievement]:
-        with self._connect() as db:
+        with self._db() as db:
             rows = db.execute(
                 """
                 SELECT a.chat_id, a.user_id, p.display_name, a.achievement_key
@@ -132,7 +145,7 @@ class PlayerStats:
         items = [(item.chat_id, item.user_id, item.key) for item in achievements]
         if not items:
             return
-        with self._connect() as db:
+        with self._db() as db:
             db.executemany(
                 "UPDATE achievements SET announced = 1 WHERE chat_id = ? AND user_id = ? AND achievement_key = ?",
                 items,
