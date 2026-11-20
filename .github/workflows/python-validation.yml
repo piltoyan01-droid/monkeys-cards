@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/match-turn-flow
+      - feature/cab-sherlock-complete
   pull_request:
     branches:
       - main
