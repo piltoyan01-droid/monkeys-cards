@@ -254,9 +254,9 @@ class GameFlow:
             return
         record = self.player_stats.get(message.from_user.id)
         await message.answer(
-            "<b>Личный кабинет игрока</b>\\n\\n"
-            f"Партий сыграно: {record.played}\\n"
-            f"Победных партий из них: {record.wins}\\n"
+            "<b>Личный кабинет игрока</b>\n\n"
+            f"Партий сыграно: {record.played}\n"
+            f"Победных партий из них: {record.wins}\n"
             f"Проигранных партий из них: {record.losses}",
             parse_mode="HTML", link_preview_options=NO_PREVIEW,
         )
@@ -299,7 +299,7 @@ class GameFlow:
                       for i, (player, count) in enumerate(others)]
         lines += ["", "Личный кабинет: /cab. Новая партия: /game."]
         sent = await bot.send_message(chat_id=game.chat_id, message_thread_id=game.thread_id,
-                                      text="\\n".join(lines), parse_mode="HTML", link_preview_options=NO_PREVIEW)
+                                      text="\n".join(lines), parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
         game.final_message_id = sent.message_id
 
