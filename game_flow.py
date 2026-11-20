@@ -15,6 +15,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 
 from inline_mode import INLINE_TTL, InlineLab, InlinePanel, InlineSession
 from match_engine import Match, MatchError, MatchManager, MAX_PLAYERS, TURNS_PER_PLAYER
+from player_stats import PlayerStats
 from public_turn import PublicLab, PublicTurn, NO_PREVIEW, apply_edit, profile_link, result_text, rich_profile, remember_profile, turn_label
 from group_settings import CardModes
 
@@ -26,13 +27,15 @@ class GameFlow:
     def __init__(self, matches: MatchManager, public_provider: Callable[[], PublicLab], inline: InlineLab,
                  close_private: Callable[[Bot, int, int], Awaitable[None]] | None = None,
                  modes: Callable[[int], CardModes] = lambda chat: CardModes(),
-                 effective_modes: Callable[[int, int], CardModes] | None = None):
+                 effective_modes: Callable[[int, int], CardModes] | None = None,
+                 player_stats: PlayerStats | None = None):
         self.matches = matches
         self.public_provider = public_provider
         self.inline = inline
         self.close_private = close_private
         self.modes = modes
         self.player_modes = effective_modes or (lambda chat, user: self.modes(chat))
+        self.player_stats = player_stats
         # Inline card selection is reserved for standalone experiments. A real
         # match always uses the private ephemeral hand and ordinary group voting.
         self.inline.mode_enabled = lambda chat, user: (
@@ -44,6 +47,7 @@ class GameFlow:
         self.router = Router(name="registered_games")
         self.router.message.register(self.create_game, Command("game"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.stats, Command("stata"), F.chat.type.in_(GROUPS))
+        self.router.message.register(self.cabinet, Command("cab"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.stop, Command("stop"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.leave, Command("leave"))
         self.router.callback_query.register(self.back_action, F.data.startswith("game:back:"))
@@ -242,25 +246,67 @@ class GameFlow:
         elif game.status == "finished":
             await self.finish_game(bot, game)
 
+    async def cabinet(self, message: Message) -> None:
+        if message.from_user is None or message.from_user.is_bot:
+            return
+        if self.player_stats is None:
+            await message.answer("Личный кабинет временно недоступен.")
+            return
+        record = self.player_stats.get(message.from_user.id)
+        win_rate = (record.wins / record.played * 100) if record.played else 0
+        await message.answer(
+            "<b>🐒 Личный кабинет MONKEYS CARDS</b>\\n\\n"
+            f"Игрок: {profile_link(message.from_user.id, message.from_user.full_name)}\\n"
+            f"Сыграно партий: <b>{record.played}</b>\\n"
+            f"Побед: <b>{record.wins}</b>\\n"
+            f"Поражений: <b>{record.losses}</b>\\n"
+            f"Процент побед: <b>{win_rate:.1f}%</b>",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW,
+        )
+
     async def finish_game(self, bot: Bot, game: Match) -> None:
-        if game.status == "finished" and game.final_message_id is None:
-            ranking = self.matches.ranking(game)
-            best = ranking[0][1]
-            winners = [(player, count) for player, count in ranking if count == best]
-            others = [(player, count) for player, count in ranking if count != best]
-            title = "Победитель:" if len(winners) == 1 else "Победители (ничья):"
-            lines = ["🏆 <b>Партия завершена!</b>", "",
-                     f"Ходов сыграно: {game.turns_done}/{game.total_turns}", "", f"<b>{title}</b>"]
-            lines += [f"{i + 1}. {profile_link(player.user_id, player.name)} — {count} карт"
-                      for i, (player, count) in enumerate(winners)]
-            if others:
-                lines += ["", "<b>Остальные игроки:</b>"]
-                lines += [f"{i + 1 + len(winners)}. {profile_link(player.user_id, player.name)} — {count} карт"
-                          for i, (player, count) in enumerate(others)]
-            lines += ["", "Новая партия: /game."]
-            sent = await bot.send_message(chat_id=game.chat_id, message_thread_id=game.thread_id,
-                                          text="\n".join(lines), parse_mode="HTML", link_preview_options=NO_PREVIEW)
-            game.final_message_id = sent.message_id
+        if game.status != "finished":
+            return
+        ranking = self.matches.ranking(game)
+        best = ranking[0][1]
+        winners = [(player, count) for player, count in ranking if count == best]
+        others = [(player, count) for player, count in ranking if count != best]
+        # Persist once before Telegram delivery; retrying the same match is safe.
+        if self.player_stats is not None:
+            self.player_stats.record_match(
+                game.token, game.chat_id,
+                [(player.user_id, player.name, count == best) for player, count in ranking],
+            )
+            pending = [item for item in self.player_stats.pending_achievements()
+                       if item.chat_id == game.chat_id]
+            for item in pending:
+                if item.key != "sherlock":
+                    continue
+                congratulation = (
+                    f"🔎 <b>Новое достижение!</b>\\n\\n"
+                    f"{profile_link(item.user_id, item.display_name)}, поздравляем!\\n"
+                    "<b>Шерлок</b> — две победы подряд. "
+                    "Достижение сохранено в вашей статистике."
+                )
+                await bot.send_message(chat_id=item.chat_id, text=congratulation,
+                                       parse_mode="HTML", link_preview_options=NO_PREVIEW)
+                self.player_stats.mark_achievements_announced([item])
+        if game.final_message_id is not None:
+            return
+        title = "Победитель:" if len(winners) == 1 else "Победители (ничья):"
+        lines = ["🏆 <b>Партия завершена!</b>", "",
+                 f"Ходов сыграно: {game.turns_done}/{game.total_turns}", "", f"<b>{title}</b>"]
+        lines += [f"{i + 1}. {profile_link(player.user_id, player.name)} — {count} карт"
+                  for i, (player, count) in enumerate(winners)]
+        if others:
+            lines += ["", "<b>Остальные игроки:</b>"]
+            lines += [f"{i + 1 + len(winners)}. {profile_link(player.user_id, player.name)} — {count} карт"
+                      for i, (player, count) in enumerate(others)]
+        lines += ["", "Личный кабинет: /cab. Новая партия: /game."]
+        sent = await bot.send_message(chat_id=game.chat_id, message_thread_id=game.thread_id,
+                                      text="\\n".join(lines), parse_mode="HTML", link_preview_options=NO_PREVIEW)
+
+        game.final_message_id = sent.message_id
 
     async def stats(self, message: Message) -> None:
         game = self.matches.games.get(message.chat.id)
