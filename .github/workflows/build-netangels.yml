@@ -1,0 +1,74 @@
+name: Build NetAngels package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/cab-sherlock-complete
+    paths:
+      - ".github/workflows/build-netangels.yml"
+      - "*.py"
+      - "requirements.txt"
+      - "*.webp"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out working branch
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Validate Python files
+        run: |
+          python -m compileall -q .
+          python -m unittest discover -v
+      - name: Assemble NetAngels package
+        run: |
+          set -euo pipefail
+          mkdir -p package/assets/stickers
+          for file in main.py config.py card_selection.py inline_mode.py public_turn.py match_engine.py game_flow.py group_settings.py player_stats.py requirements.txt; do
+            test -f "$file"
+            cp "$file" package/
+          done
+          count=0
+          for file in *.webp; do
+            test -f "$file"
+            cp "$file" package/assets/stickers/
+            count=$((count + 1))
+          done
+          test "$count" -eq 37
+          cat > package/README_NETANGELS.txt <<'EOF'
+MONKEYS CARDS — package for NetAngels
+
+1. Upload and extract this ZIP into the bot project directory.
+2. Keep the assets/stickers folder in the same directory as main.py.
+3. Install dependencies from requirements.txt:
+   python -m pip install -r requirements.txt
+4. Configure BOT_TOKEN as an environment variable in the hosting panel.
+   Optional: BOT_USERNAME (without @). Default: monkeysmafcardsbot.
+5. Start the bot with:
+   python main.py
+
+Do not upload your bot token to GitHub or include it in this archive.
+This package is built from feature/cab-sherlock-complete.
+EOF
+          cd package
+          zip -qr ../MONKEYS-CARDS-NetAngels.zip .
+          cd ..
+          unzip -t MONKEYS-CARDS-NetAngels.zip
+          test "$(unzip -Z1 MONKEYS-CARDS-NetAngels.zip | grep -c '^assets/stickers/.*\.webp$')" -eq 37
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MONKEYS-CARDS-NetAngels
+          path: MONKEYS-CARDS-NetAngels.zip
+          if-no-files-found: error
+          retention-days: 14
