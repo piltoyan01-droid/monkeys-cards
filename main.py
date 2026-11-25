@@ -1,6 +1,7 @@
 """Four independent Telegram group experiments, including an inline fallback."""
 
 import asyncio
+from io import BytesIO
 from dataclasses import dataclass, field, replace
 import logging
 import random
@@ -16,6 +17,8 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError,
 )
 from aiogram.filters import Command
+from PIL import Image
+
 from aiogram.types import (
     CallbackQuery, EphemeralMessageParameters, ErrorEvent, FSInputFile,
     InlineKeyboardButton, InlineKeyboardMarkup, Message,
@@ -106,6 +109,34 @@ def panel_keyboard() -> InlineKeyboardMarkup:
 private_hand_views: dict[tuple[int, int], tuple[str, list[int]]] = {}
 
 
+def build_hand_image(cards: tuple[str, ...]) -> BytesIO:
+    """Compose the player's current cards into one private horizontal strip."""
+    filenames = [card_filename(card) for card in cards]
+    paths = [public_lab.asset_dir / filename for filename in filenames]
+    with Image.open(paths[0]) as first:
+        ratio = first.width / first.height
+    gap, margin, max_width, max_height = 14, 24, 9500, 680
+    card_width = min(460, (max_width - 2 * margin - gap * (len(paths) - 1)) // len(paths))
+    card_height = max(1, round(card_width / ratio))
+    if card_height > max_height:
+        card_height = max_height
+        card_width = max(1, round(card_height * ratio))
+    canvas_width = 2 * margin + len(paths) * card_width + (len(paths) - 1) * gap
+    canvas = Image.new("RGB", (canvas_width, card_height + 2 * margin), "#f3eee5")
+    for index, path in enumerate(paths):
+        with Image.open(path) as source:
+            card = source.convert("RGB")
+            card.thumbnail((card_width, card_height), Image.Resampling.LANCZOS)
+            x = margin + index * (card_width + gap) + (card_width - card.width) // 2
+            y = margin + (card_height - card.height) // 2
+            canvas.paste(card, (x, y))
+    output = BytesIO()
+    canvas.save(output, format="JPEG", quality=92, optimize=True)
+    output.seek(0)
+    output.name = "monkeys-cards-hand.jpg"
+    return output
+
+
 async def delete_private_hand_view(bot: Bot, key: tuple[int, int]) -> None:
     current = private_hand_views.pop(key, None)
     if current is None:
@@ -171,24 +202,21 @@ async def show_private_hand(message: Message, bot: Bot) -> None:
             raise RuntimeError("Telegram не вернул идентификатор эфемерного сообщения")
         ephemeral_ids.append(header.ephemeral_message_id)
 
-        for card in cards:
-            filename = card_filename(card)
-            sticker = public_lab.sticker_ids.get(filename) or FSInputFile(public_lab.asset_dir / filename)
-            sent = await bot.send_sticker(
-                chat_id=message.chat.id,
-                message_thread_id=message.message_thread_id,
-                sticker=sticker,
-                ephemeral_message_parameters=ephemeral,
-            )
-            if sent.ephemeral_message_id is None:
-                raise RuntimeError("Telegram не вернул идентификатор эфемерной карты")
-            ephemeral_ids.append(sent.ephemeral_message_id)
-            if sent.sticker and isinstance(sent.sticker.file_id, str):
-                public_lab.sticker_ids[filename] = sent.sticker.file_id
+        collage = build_hand_image(cards)
+        sent = await bot.send_photo(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            photo=collage,
+            ephemeral_message_parameters=ephemeral,
+        )
+        if sent.ephemeral_message_id is None:
+            raise RuntimeError("Telegram не вернул идентификатор эфемерного изображения")
+        ephemeral_ids.append(sent.ephemeral_message_id)
 
         private_hand_views[key] = (nonce, ephemeral_ids)
-        LOG.info("private_hand_view_sent chat=%s user=%s cards=%s", message.chat.id, user.id, len(cards))
-    except (TelegramAPIError, RuntimeError) as error:
+        LOG.info("private_hand_view_sent chat=%s user=%s cards=%s layout=horizontal",
+                 message.chat.id, user.id, len(cards))
+    except (TelegramAPIError, RuntimeError, OSError, ValueError) as error:
         for ephemeral_id in ephemeral_ids:
             try:
                 await bot.delete_ephemeral_message(
@@ -220,7 +248,6 @@ async def close_private_hand_callback(callback: CallbackQuery, bot: Bot) -> None
         return
     await delete_private_hand_view(bot, key)
     await callback.answer("Просмотр закрыт.")
-
 
 def hand_keyboard(view: HandView) -> InlineKeyboardMarkup:
     if view.experiment in {2, 3}:
