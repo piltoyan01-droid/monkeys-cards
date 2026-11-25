@@ -17,7 +17,7 @@ from aiogram.exceptions import (
 )
 from aiogram.filters import Command
 from aiogram.types import (
-    CallbackQuery, EphemeralMessageParameters, ErrorEvent,
+    CallbackQuery, EphemeralMessageParameters, ErrorEvent, FSInputFile,
     InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
 
@@ -26,7 +26,7 @@ from card_selection import (
     DECK, Phase, Selection, SelectionError, advance_selection,
     selection_keyboard, selection_text,
 )
-from public_turn import PublicLab, PublicTurn, PublicTurnError, remember_profile
+from public_turn import PublicLab, PublicTurn, PublicTurnError, card_filename, remember_profile
 from inline_mode import InlineLab
 from match_engine import MatchError, MatchManager
 from game_flow import GameFlow
@@ -99,6 +99,127 @@ def panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Мои карты", callback_data="lab:open")
     ]])
+
+
+# Ephemeral card-view messages are tracked separately from the active turn-selection
+# session so that opening /hand never overwrites or resets a move in progress.
+private_hand_views: dict[tuple[int, int], tuple[str, list[int]]] = {}
+
+
+async def delete_private_hand_view(bot: Bot, key: tuple[int, int]) -> None:
+    current = private_hand_views.pop(key, None)
+    if current is None:
+        return
+    _, ephemeral_ids = current
+    for ephemeral_id in ephemeral_ids:
+        try:
+            await bot.delete_ephemeral_message(
+                chat_id=key[0], receiver_user_id=key[1],
+                ephemeral_message_id=ephemeral_id,
+            )
+        except TelegramAPIError as error:
+            LOG.warning("private_hand_delete_failed error=%s", type(error).__name__)
+
+
+async def send_private_hand_notice(bot: Bot, chat_id: int, user_id: int, text: str) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        ephemeral_message_parameters=EphemeralMessageParameters(receiver_user_id=user_id),
+    )
+
+
+@router.message(Command("hand"), F.chat.type.in_(GROUPS))
+async def show_private_hand(message: Message, bot: Bot) -> None:
+    user = message.from_user
+    if user is None or user.is_bot:
+        return
+
+    game = matches.ongoing(message.chat.id)
+    if game is None or game.status != "active":
+        await send_private_hand_notice(bot, message.chat.id, user.id,
+                                       "Сейчас в этой группе нет активной партии MONKEYS CARDS.")
+        return
+    if user.id not in game.hands:
+        await send_private_hand_notice(bot, message.chat.id, user.id,
+                                       "Вы не участвуете в текущей партии.")
+        return
+
+    cards = tuple(game.hands[user.id])
+    if not cards:
+        await send_private_hand_notice(bot, message.chat.id, user.id,
+                                       "У тебя сейчас нет карт на руках.")
+        return
+
+    key = (message.chat.id, user.id)
+    await delete_private_hand_view(bot, key)
+
+    nonce = secrets.token_urlsafe(6)
+    ephemeral_ids: list[int] = []
+    ephemeral = EphemeralMessageParameters(receiver_user_id=user.id)
+    try:
+        header = await bot.send_message(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text=f"Твоя рука · {len(cards)} карт\\nЭто только просмотр. Нажми /hand, чтобы обновить.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Закрыть просмотр", callback_data=f"hand:close:{nonce}")
+            ]]),
+            ephemeral_message_parameters=ephemeral,
+        )
+        if header.ephemeral_message_id is None:
+            raise RuntimeError("Telegram не вернул идентификатор эфемерного сообщения")
+        ephemeral_ids.append(header.ephemeral_message_id)
+
+        for card in cards:
+            filename = card_filename(card)
+            sticker = public_lab.sticker_ids.get(filename) or FSInputFile(public_lab.asset_dir / filename)
+            sent = await bot.send_sticker(
+                chat_id=message.chat.id,
+                message_thread_id=message.message_thread_id,
+                sticker=sticker,
+                ephemeral_message_parameters=ephemeral,
+            )
+            if sent.ephemeral_message_id is None:
+                raise RuntimeError("Telegram не вернул идентификатор эфемерной карты")
+            ephemeral_ids.append(sent.ephemeral_message_id)
+            if sent.sticker and isinstance(sent.sticker.file_id, str):
+                public_lab.sticker_ids[filename] = sent.sticker.file_id
+
+        private_hand_views[key] = (nonce, ephemeral_ids)
+        LOG.info("private_hand_view_sent chat=%s user=%s cards=%s", message.chat.id, user.id, len(cards))
+    except (TelegramAPIError, RuntimeError) as error:
+        for ephemeral_id in ephemeral_ids:
+            try:
+                await bot.delete_ephemeral_message(
+                    chat_id=message.chat.id, receiver_user_id=user.id,
+                    ephemeral_message_id=ephemeral_id,
+                )
+            except TelegramAPIError:
+                pass
+        LOG.warning("private_hand_view_failed chat=%s user=%s error=%s",
+                    message.chat.id, user.id, type(error).__name__)
+        await send_private_hand_notice(
+            bot, message.chat.id, user.id,
+            "Не удалось открыть просмотр карт. Попробуй ещё раз командой /hand.",
+        )
+
+
+@router.callback_query(F.data.startswith("hand:close:"))
+async def close_private_hand_callback(callback: CallbackQuery, bot: Bot) -> None:
+    message = callback.message
+    if not isinstance(message, Message) or message.chat.type not in GROUPS:
+        await callback.answer("Это окно просмотра недоступно.", show_alert=True)
+        return
+    key = (message.chat.id, callback.from_user.id)
+    current = private_hand_views.get(key)
+    parts = (callback.data or "").split(":")
+    if (current is None or len(parts) != 3 or parts[2] != current[0]
+            or message.ephemeral_message_id != current[1][0]):
+        await callback.answer("Это окно уже закрыто или устарело.", show_alert=True)
+        return
+    await delete_private_hand_view(bot, key)
+    await callback.answer("Просмотр закрыт.")
 
 
 def hand_keyboard(view: HandView) -> InlineKeyboardMarkup:
