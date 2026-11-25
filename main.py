@@ -17,7 +17,7 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError,
 )
 from aiogram.filters import Command
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from aiogram.types import (
     CallbackQuery, EphemeralMessageParameters, ErrorEvent, FSInputFile,
@@ -110,28 +110,114 @@ private_hand_views: dict[tuple[int, int], tuple[str, list[int]]] = {}
 
 
 def build_hand_image(cards: tuple[str, ...]) -> BytesIO:
-    """Compose the player's current cards into one private horizontal strip."""
+    """Create a burgundy-and-gold MONKEYS CARDS hand panel with an original horizontal card row."""
     filenames = [card_filename(card) for card in cards]
     paths = [public_lab.asset_dir / filename for filename in filenames]
     with Image.open(paths[0]) as first:
         ratio = first.width / first.height
-    gap, margin, max_width, max_height = 14, 24, 9500, 680
-    card_width = min(460, (max_width - 2 * margin - gap * (len(paths) - 1)) // len(paths))
+
+    count = len(paths)
+    gap = 18 if count <= 12 else 10
+    side = 54
+    max_width, max_card_height = 9500, 680
+    card_width = min(460, (max_width - 2 * side - gap * (count - 1)) // count)
     card_height = max(1, round(card_width / ratio))
-    if card_height > max_height:
-        card_height = max_height
+    if card_height > max_card_height:
+        card_height = max_card_height
         card_width = max(1, round(card_height * ratio))
-    canvas_width = 2 * margin + len(paths) * card_width + (len(paths) - 1) * gap
-    canvas = Image.new("RGB", (canvas_width, card_height + 2 * margin), "#f3eee5")
+
+    header_height, footer_height = 150, 94
+    card_top = header_height + 34
+    card_bottom = card_top + card_height + 34
+    canvas_width = 2 * side + count * card_width + (count - 1) * gap
+    canvas_height = card_bottom + footer_height
+    burgundy = ( seventy := 76, 23, 37)
+    gold = (224, 190, 119)
+    pale_gold = (244, 224, 177)
+    cream = (246, 237, 218)
+    dark = (73, 34, 34)
+
+    canvas = Image.new("RGB", (canvas_width, canvas_height), burgundy)
+    draw = ImageDraw.Draw(canvas)
+
+    def load_font(size: int, serif: bool = False):
+        candidates = (
+            ["/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+             "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf"]
+            if serif else
+            ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"]
+        )
+        for font_path in candidates:
+            try:
+                return ImageFont.truetype(font_path, size=size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    title_font = load_font(48, serif=True)
+    subtitle_font = load_font(25)
+    footer_font = load_font(23)
+    count_font = load_font(22)
+
+    # Double gold frame and restrained corner ornaments.
+    inset = 18
+    draw.rounded_rectangle((inset, inset, canvas_width - inset, canvas_height - inset),
+                           radius=28, outline=gold, width=4)
+    draw.rounded_rectangle((inset + 10, inset + 10, canvas_width - inset - 10,
+                            canvas_height - inset - 10), radius=22,
+                           outline=(139, 91, 65), width=2)
+
+    title = "MONKEYS CARDS"
+    title_box = draw.textbbox((0, 0), title, font=title_font)
+    title_width = title_box[2] - title_box[0]
+    draw.text(((canvas_width - title_width) / 2, 39), title,
+              font=title_font, fill=pale_gold, stroke_width=0)
+    subtitle = f"ТВОЯ КОЛОДА  ·  {count} КАРТ"
+    subtitle_box = draw.textbbox((0, 0), subtitle, font=subtitle_font)
+    subtitle_width = subtitle_box[2] - subtitle_box[0]
+    draw.text(((canvas_width - subtitle_width) / 2, 101), subtitle,
+              font=subtitle_font, fill=gold)
+
+    center_y = header_height + 15
+    ornament = 10
+    draw.polygon([(canvas_width // 2, center_y - ornament),
+                  (canvas_width // 2 + ornament, center_y),
+                  (canvas_width // 2, center_y + ornament),
+                  (canvas_width // 2 - ornament, center_y)], fill=gold)
+
+    # Warm ivory card mat, with gold edging and subtle shadow under every original card.
+    mat_left, mat_right = side - 15, canvas_width - side + 15
+    draw.rounded_rectangle((mat_left, card_top, mat_right, card_bottom),
+                           radius=22, fill=cream, outline=gold, width=3)
     for index, path in enumerate(paths):
         with Image.open(path) as source:
             card = source.convert("RGB")
             card.thumbnail((card_width, card_height), Image.Resampling.LANCZOS)
-            x = margin + index * (card_width + gap) + (card_width - card.width) // 2
-            y = margin + (card_height - card.height) // 2
-            canvas.paste(card, (x, y))
+        x = side + index * (card_width + gap) + (card_width - card.width) // 2
+        y = card_top + (card_height + 34 - card.height) // 2
+        draw.rounded_rectangle((x - 5, y - 5, x + card.width + 5, y + card.height + 5),
+                               radius=9, fill=(211, 198, 174))
+        canvas.paste(card, (x, y))
+
+    footer = "ЛИЧНАЯ РУКА  ·  ТОЛЬКО ДЛЯ ТЕБЯ"
+    footer_box = draw.textbbox((0, 0), footer, font=footer_font)
+    footer_width = footer_box[2] - footer_box[0]
+    draw.text(((canvas_width - footer_width) / 2, card_bottom + 30),
+              footer, font=footer_font, fill=pale_gold)
+
+    # Tiny gold separators complete the decorative footer without competing with the cards.
+    line_y = card_bottom + 67
+    draw.line((canvas_width // 2 - 130, line_y, canvas_width // 2 - 82, line_y),
+              fill=gold, width=2)
+    draw.line((canvas_width // 2 + 82, line_y, canvas_width // 2 + 130, line_y),
+              fill=gold, width=2)
+    draw.polygon([(canvas_width // 2, line_y - 6), (canvas_width // 2 + 6, line_y),
+                  (canvas_width // 2, line_y + 6), (canvas_width // 2 - 6, line_y)],
+                 fill=gold)
+
     output = BytesIO()
-    canvas.save(output, format="JPEG", quality=92, optimize=True)
+    canvas.save(output, format="JPEG", quality=91, optimize=True)
     output.seek(0)
     output.name = "monkeys-cards-hand.jpg"
     return output
