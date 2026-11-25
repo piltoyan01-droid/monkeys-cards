@@ -8,7 +8,7 @@ from typing import Callable
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage, Message,
                            InputRichBlockParagraph, InputRichBlockDetails, RichTextBold)
@@ -48,6 +48,7 @@ class GameFlow:
         self.router.message.register(self.create_game, Command("game"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.stats, Command("stata"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.cabinet, Command("cab"), F.chat.type.in_(GROUPS))
+        self.router.callback_query.register(self.cabinet_action, F.data.in_({"cab:group", "cab:private"}))
         self.router.message.register(self.stop, Command("stop"), F.chat.type.in_(GROUPS))
         self.router.message.register(self.leave, Command("leave"))
         self.router.callback_query.register(self.back_action, F.data.startswith("game:back:"))
@@ -246,20 +247,63 @@ class GameFlow:
         elif game.status == "finished":
             await self.finish_game(bot, game)
 
+    def cabinet_text(self, user_id: int) -> str:
+        if self.player_stats is None:
+            return "Личный кабинет временно недоступен."
+        record = self.player_stats.get(user_id)
+        return (
+            "<b>Личный кабинет игрока</b>\\n\\n"
+            f"Партий сыграно: {record.played}\\n"
+            f"Победных партий из них: {record.wins}\\n"
+            f"Проигранных партий из них: {record.losses}"
+        )
+
     async def cabinet(self, message: Message) -> None:
         if message.from_user is None or message.from_user.is_bot:
             return
-        if self.player_stats is None:
-            await message.answer("Личный кабинет временно недоступен.")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="В общий чат", callback_data="cab:group")],
+            [InlineKeyboardButton(text="В личные сообщения", callback_data="cab:private")],
+        ])
+        await message.answer("Куда отправить личный кабинет?", reply_markup=keyboard)
+
+    async def cabinet_action(self, callback: CallbackQuery, bot: Bot) -> None:
+        message = callback.message
+        if not isinstance(message, Message) or message.chat.type not in GROUPS:
+            await callback.answer("Используйте /cab в общей группе.", show_alert=True)
             return
-        record = self.player_stats.get(message.from_user.id)
-        await message.answer(
-            "<b>Личный кабинет игрока</b>\n\n"
-            f"Партий сыграно: {record.played}\n"
-            f"Победных партий из них: {record.wins}\n"
-            f"Проигранных партий из них: {record.losses}",
-            parse_mode="HTML", link_preview_options=NO_PREVIEW,
+        if callback.from_user.is_bot:
+            await callback.answer()
+            return
+        text = self.cabinet_text(callback.from_user.id)
+        if callback.data == "cab:group":
+            await bot.send_message(
+                chat_id=message.chat.id, message_thread_id=message.message_thread_id,
+                text=text, parse_mode="HTML", link_preview_options=NO_PREVIEW,
+            )
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id, message_id=message.message_id, reply_markup=None,
+            )
+            await callback.answer("Личный кабинет отправлен в общий чат.")
+            return
+        try:
+            await bot.send_message(
+                chat_id=callback.from_user.id, text=text,
+                parse_mode="HTML", link_preview_options=NO_PREVIEW,
+            )
+        except TelegramForbiddenError:
+            await callback.answer(
+                "Сначала откройте личный чат с ботом и отправьте /start. Затем вернитесь сюда и нажмите кнопку ещё раз.",
+                show_alert=True,
+            )
+            return
+        except TelegramAPIError:
+            await callback.answer("Не удалось отправить сообщение. Попробуйте ещё раз.", show_alert=True)
+            return
+        await bot.edit_message_reply_markup(
+            chat_id=message.chat.id, message_id=message.message_id, reply_markup=None,
         )
+        await callback.answer("Личный кабинет отправлен вам в личные сообщения.")
 
     async def finish_game(self, bot: Bot, game: Match) -> None:
         if game.status != "finished":
